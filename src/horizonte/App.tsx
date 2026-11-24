@@ -20,6 +20,7 @@ import {
 import type {
   ActiveEnemy,
   CrewMember,
+  EncounterGearCategory,
   EncounterState,
   LogEntry,
   Mission,
@@ -63,8 +64,9 @@ import { DEFAULT_ORIGIN_BONUSES, mergeOriginBonuses, SPECIAL_ABILITIES_BY_ID } f
 import { generateSolarSystem, getSystemsInRadius, getSystemSummaryById, KNOWN_GALAXY_SYSTEMS } from './data/universe';
 import { compartmentUsed, computeCrewBonuses, computeFleeSuccessChance, computeShipDerivedStats, crewHealthRatio, estimateEncounterWinChance, getEffectiveRoleSkill } from './engine/combat';
 import { quoteSale, resourceSupplyBand } from './engine/market';
-import { markDefeatedHuntMissions, planRandomEncounter } from './engine/encounters';
+import { buildCommercialTrade, markDefeatedHuntMissions, planRandomEncounter } from './engine/encounters';
 import {
+  detachInstalledGear,
   equipVaultGear,
   installGearOnShip,
   normalizeFactionVault,
@@ -110,7 +112,7 @@ import { EncounterModal } from './components/EncounterModal';
 import { CombatPanel, type FleeState } from './components/CombatPanel';
 import { HyperspaceWarpOverlay } from './components/HyperspaceWarpOverlay';
 import { ErrorBoundary } from './components/ErrorBoundary';
-import { getLevelStyle } from './utils/formatting';
+import { getEquipmentMeta, getLevelStyle } from './utils/formatting';
 import {
   enterGameFullscreen,
   exitGameFullscreen,
@@ -507,20 +509,13 @@ export default function App() {
 
       const allRes = Object.values(RESOURCES_BY_ID);
       const seedMix = effectiveSys.seed + Math.floor(curCampaign.gameTimeSeconds);
-      const pick3 = [0, 1, 2].map((idx) => {
-        const res = allRes[(seedMix + idx * 7) % allRes.length];
-        return {
-          resourceId: res.id,
-          qty: 3 + ((seedMix + idx) % 6),
-          price: Math.max(4, Math.round(res.basePrice * (0.85 + idx * 0.12))),
-        };
-      });
+      const diplomaticRes = allRes[Math.abs(seedMix) % allRes.length];
 
       const missionOffer: Mission | undefined =
-        plan.kind === 'diplomatico' && fullSys.planets.length > 0
+        plan.kind === 'diplomatico' && fullSys.planets.length > 0 && diplomaticRes
           ? {
               id: `enc_mis_${Date.now()}`,
-              title: `Contrato: ${RESOURCES_BY_ID[pick3[0].resourceId].name}`,
+              title: `Contrato: ${diplomaticRes.name}`,
               type: 'entrega_comercio',
               issuerFactionId: attackerFacId,
               targetSystemId: effectiveSys.id,
@@ -528,14 +523,14 @@ export default function App() {
               targetSystemCoord: { x: effectiveSys.x, y: effectiveSys.y, z: effectiveSys.z },
               targetPlanetId: fullSys.planets[0].id,
               targetPlanetName: fullSys.planets[0].name,
-              requiredResourceId: pick3[0].resourceId,
-              requiredResourceName: RESOURCES_BY_ID[pick3[0].resourceId].name,
+              requiredResourceId: diplomaticRes.id,
+              requiredResourceName: diplomaticRes.name,
               requiredQty: 4,
               rewardCredits: 420 + techInfo.techLevel * 140,
               rewardRenown: 14,
               isRivalTerritory: false,
               status: 'disponivel',
-              description: `Entregar 4 unidades de ${RESOURCES_BY_ID[pick3[0].resourceId].name} em órbita de ${fullSys.planets[0].name}.`,
+              description: `Entregar 4 unidades de ${diplomaticRes.name} em órbita de ${fullSys.planets[0].name}.`,
             }
           : undefined;
 
@@ -564,7 +559,10 @@ export default function App() {
         forcedCombat: forced,
         winChancePct: est.winChancePct,
         tacticalRating: est.tacticalRating,
-        tradeOffer: plan.kind === 'comercial' ? { resources: pick3, items: [] } : undefined,
+        tradeOffer:
+          plan.kind === 'comercial'
+            ? buildCommercialTrade(curCampaign, ship, fullSys.planets, attackerFacId, bon.tradePriceBonus, seedMix)
+            : undefined,
         missionOffer,
       });
     },
@@ -2397,6 +2395,67 @@ export default function App() {
     notify(`Vendido ${sellQty} ${res.name} por ${total} créditos.`);
   };
 
+  const handleSellEncounterResource = (resourceId: string, qty: number, unitPrice: number) => {
+    if (!campaign || qty <= 0 || unitPrice <= 0) return;
+    const res = RESOURCES_BY_ID[resourceId];
+    if (!res) return;
+    const held = campaign.cargo.find((entry) => entry.resourceId === resourceId)?.qty ?? 0;
+    const sellQty = Math.min(qty, held);
+    if (sellQty <= 0) return;
+    const total = unitPrice * sellQty;
+    soundEngine.playClick();
+    setCampaign((prev) => {
+      if (!prev) return prev;
+      const still = prev.cargo.find((entry) => entry.resourceId === resourceId)?.qty ?? 0;
+      const paidQty = Math.min(sellQty, still);
+      if (paidQty <= 0) return prev;
+      return {
+        ...prev,
+        credits: prev.credits + unitPrice * paidQty,
+        cargo: removeCargoItem(prev.cargo, resourceId, paidQty),
+        logbook: [
+          ...prev.logbook,
+          makeLog(
+            'comercio',
+            `Vendido ${paidQty} ${res.name} no encontro por ${unitPrice * paidQty} créditos.`,
+            prev.gameTimeSeconds
+          ),
+        ],
+      };
+    });
+    notify(`Vendido ${sellQty} ${res.name} por ${total} créditos.`);
+  };
+
+  const handleSellEncounterGear = (
+    category: EncounterGearCategory,
+    itemId: string,
+    slotIndex: number,
+    price: number
+  ) => {
+    if (!campaign || price <= 0) return;
+    const ship = campaign.ships.find((entry) => entry.uid === campaign.activeShipUid) ?? campaign.ships[0];
+    if (!ship || !detachInstalledGear(ship, category, itemId, slotIndex)) return;
+    const meta = getEquipmentMeta(category, itemId);
+    soundEngine.playClick();
+    setCampaign((prev) => {
+      if (!prev) return prev;
+      const current = prev.ships.find((entry) => entry.uid === prev.activeShipUid) ?? prev.ships[0];
+      if (!current) return prev;
+      const detached = detachInstalledGear(current, category, itemId, slotIndex);
+      if (!detached) return prev;
+      return {
+        ...prev,
+        ships: prev.ships.map((entry) => (entry.uid === current.uid ? detached.ship : entry)),
+        credits: prev.credits + price,
+        logbook: [
+          ...prev.logbook,
+          makeLog('comercio', `${meta.name} vendido no encontro por ${price} créditos.`, prev.gameTimeSeconds),
+        ],
+      };
+    });
+    notify(`${meta.name} vendido por ${price} créditos.`);
+  };
+
   const handleBuyConsumable = (consumableId: string, price: number) => {
     if (!campaign || !activeShip || !shipStats || campaign.credits < price) return;
     const def = CONSUMABLES_BY_ID[consumableId];
@@ -4140,9 +4199,10 @@ export default function App() {
                 : prev
             );
           }}
-          onSellResource={(resourceId, qty) => {
-            handleSellResource(resourceId, qty);
+          onSellResource={(resourceId, qty, unitPrice) => {
+            handleSellEncounterResource(resourceId, qty, unitPrice);
           }}
+          onSellInstalled={handleSellEncounterGear}
           onAcceptMission={() => {
             if (pendingEncounter.missionOffer) {
               handleAcceptMission(pendingEncounter.missionOffer);

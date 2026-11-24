@@ -57,14 +57,141 @@ interface ObstacleCircle {
   id?: string;
 }
 
-function createVolcanicDestroyedMaterial(seed: number, maxAnisotropy: number): THREE.MeshStandardMaterial {
-  return new THREE.MeshStandardMaterial({
-    map: getPlanetTexture('TX04', seed, maxAnisotropy),
-    emissive: new THREE.Color('#ea580c'),
-    emissiveIntensity: 0.62,
-    roughness: 0.58,
-    metalness: 0.06,
+function rockNoise(x: number, y: number, z: number, salt: number): number {
+  const s = Math.sin(x * 9.1 + salt) * Math.cos(y * 7.3 + salt * 0.37) * Math.sin(z * 8.4 + salt * 0.71);
+  const fine = Math.sin((x + z) * 16.4 + salt * 1.7) * Math.cos(y * 13.2 - salt);
+  return s * 0.65 + fine * 0.35;
+}
+
+/** Mundo queimado: três pedaços irregulares de rocha, lava na rachadura e destroços. */
+function buildShatteredPlanet(radius: number, seed: number, maxAnisotropy: number): THREE.Group {
+  const unit = (n: number) => {
+    const x = Math.sin(seed * 12.9898 + n * 78.233) * 43758.5453;
+    return x - Math.floor(x);
+  };
+  const yaw = unit(2) * Math.PI * 2;
+  const tilt = (unit(3) - 0.5) * 0.55;
+  const axes = [0, 1, 2].map((i) => {
+    const a = yaw + (i * Math.PI * 2) / 3;
+    return new THREE.Vector3(Math.cos(a), tilt + (i - 1) * 0.22, Math.sin(a)).normalize();
   });
+
+  const src = new THREE.IcosahedronGeometry(1, 2).toNonIndexed();
+  const srcPos = src.getAttribute('position');
+  const srcUv = src.getAttribute('uv');
+  const buckets: number[][] = [[], [], []];
+  const centroid = new THREE.Vector3();
+  const vertex = new THREE.Vector3();
+  for (let i = 0; i < srcPos.count; i += 3) {
+    centroid.set(0, 0, 0);
+    for (let k = 0; k < 3; k++) {
+      vertex.fromBufferAttribute(srcPos, i + k);
+      centroid.add(vertex);
+    }
+    centroid.multiplyScalar(1 / 3).normalize();
+    let best = 0;
+    let bestDot = -Infinity;
+    for (let a = 0; a < 3; a++) {
+      const d = centroid.dot(axes[a]);
+      if (d > bestDot) {
+        bestDot = d;
+        best = a;
+      }
+    }
+    buckets[best].push(i, i + 1, i + 2);
+  }
+
+  const tex = getDestroyedPlanetTexture(seed, maxAnisotropy);
+  const rockMat = new THREE.MeshStandardMaterial({
+    map: tex.map,
+    emissiveMap: tex.emissiveMap,
+    emissive: new THREE.Color('#ff7a2a'),
+    emissiveIntensity: 0.95,
+    bumpMap: tex.bumpMap,
+    bumpScale: radius * 0.18,
+    roughness: 0.9,
+    metalness: 0.05,
+  });
+
+  const ruin = new THREE.Group();
+  ruin.name = 'ruin';
+
+  buckets.forEach((indices, chunkIndex) => {
+    const positions: number[] = [];
+    const uvs: number[] = [];
+    const axis = axes[chunkIndex];
+    for (const idx of indices) {
+      vertex.fromBufferAttribute(srcPos, idx);
+      const n = vertex.clone().normalize();
+      const lump = 0.86 + rockNoise(n.x, n.y, n.z, seed + chunkIndex * 19) * 0.22;
+      const facing = Math.max(0, n.dot(axis));
+      vertex.copy(n).multiplyScalar(radius * lump);
+      vertex.addScaledVector(axis, radius * (0.1 + facing * 0.26));
+      positions.push(vertex.x, vertex.y, vertex.z);
+      if (srcUv) {
+        uvs.push(srcUv.getX(idx), srcUv.getY(idx));
+      }
+    }
+    const geo = new THREE.BufferGeometry();
+    geo.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3));
+    if (uvs.length > 0) geo.setAttribute('uv', new THREE.Float32BufferAttribute(uvs, 2));
+    geo.computeVertexNormals();
+    ruin.add(new THREE.Mesh(geo, rockMat));
+  });
+  src.dispose();
+
+  const coreGeo = new THREE.IcosahedronGeometry(radius * 0.58, 1);
+  const corePos = coreGeo.getAttribute('position');
+  for (let i = 0; i < corePos.count; i++) {
+    vertex.fromBufferAttribute(corePos, i);
+    const n = vertex.clone().normalize();
+    const lump = 0.82 + Math.abs(rockNoise(n.x, n.y, n.z, seed + 90)) * 0.36;
+    vertex.copy(n).multiplyScalar(radius * 0.58 * lump);
+    corePos.setXYZ(i, vertex.x, vertex.y, vertex.z);
+  }
+  corePos.needsUpdate = true;
+  coreGeo.computeVertexNormals();
+  const core = new THREE.Mesh(
+    coreGeo,
+    new THREE.MeshStandardMaterial({
+      color: '#7f1d1d',
+      emissive: new THREE.Color('#ffb020'),
+      emissiveIntensity: 1.65,
+      roughness: 0.38,
+      metalness: 0.02,
+    })
+  );
+  core.name = 'lava-core';
+  ruin.add(core);
+  ruin.add(new THREE.PointLight('#ff6a1a', 1.8, radius * 7.5, 1.5));
+
+  const debris = new THREE.Group();
+  debris.name = 'debris';
+  const basalt = new THREE.MeshStandardMaterial({ color: '#2a2426', roughness: 0.94, metalness: 0.08 });
+  const ember = new THREE.MeshStandardMaterial({
+    color: '#3f241c',
+    emissive: new THREE.Color('#ea580c'),
+    emissiveIntensity: 0.7,
+    roughness: 0.72,
+  });
+  for (let i = 0; i < 11; i++) {
+    const size = radius * (0.08 + unit(10 + i) * 0.14);
+    const rock = new THREE.Mesh(new THREE.DodecahedronGeometry(size, 0), i % 3 === 0 ? ember : basalt);
+    const ang = unit(30 + i) * Math.PI * 2;
+    const elev = (unit(50 + i) - 0.5) * radius * 0.7;
+    const dist = radius * (1.7 + unit(70 + i) * 0.95);
+    rock.position.set(Math.cos(ang) * dist, elev, Math.sin(ang) * dist);
+    const sx = 0.7 + unit(90 + i) * 0.8;
+    rock.scale.set(sx, 0.35 + unit(110 + i) * 0.7, 0.65 + unit(130 + i) * 0.6);
+    rock.rotation.set(unit(150 + i) * 4, unit(170 + i) * 4, unit(190 + i) * 4);
+    debris.add(rock);
+  }
+  ruin.add(debris);
+  return ruin;
+}
+
+function invisiblePlanetHitMaterial(): THREE.MeshBasicMaterial {
+  return new THREE.MeshBasicMaterial({ transparent: true, opacity: 0, depthWrite: false });
 }
 
 // Compute tangent-routed path around star exclusion & planetary spheres so ships steer around obstacles
@@ -783,30 +910,20 @@ export const SolarSystemViewport: React.FC<SolarSystemViewportProps> = (props) =
         const pGroup = new THREE.Group();
         const sphereGeo = new THREE.SphereGeometry(p.radius, 28, 28);
         const sphereMat = isDestroyed
-          ? createVolcanicDestroyedMaterial(p.seed, maxAniso)
+          ? invisiblePlanetHitMaterial()
           : new THREE.MeshStandardMaterial({
               map: getPlanetTexture(p.typeCode, p.seed, maxAniso),
               roughness: 0.72,
               metalness: p.typeCode === 'TX09' || p.typeCode === 'TX22' ? 0.65 : 0.08,
             });
         const sphere = new THREE.Mesh(sphereGeo, sphereMat);
+        if (isDestroyed) sphere.scale.setScalar(1.25);
         sphere.userData = { clickKind: 'planet', planetId: p.id };
         pGroup.add(sphere);
         clickableMeshes.push(sphere);
 
         if (isDestroyed) {
-          // Orbiting shattered basalt crust fragments around devastated world
-          for (let f = 0; f < 5; f++) {
-            const frag = new THREE.Mesh(
-              new THREE.DodecahedronGeometry(p.radius * 0.14, 0),
-              new THREE.MeshStandardMaterial({ color: '#272024', emissive: '#9a3412', emissiveIntensity: 0.45, roughness: 0.9 })
-            );
-            const fa = (f / 5) * Math.PI * 2;
-            const fr = p.radius * 1.48 + (f % 2) * 0.45;
-            frag.position.set(Math.cos(fa) * fr, ((f % 3) - 1) * 0.35, Math.sin(fa) * fr);
-            frag.rotation.set(f * 0.8, f * 1.3, 0);
-            pGroup.add(frag);
-          }
+          pGroup.add(buildShatteredPlanet(p.radius, p.seed, maxAniso));
         } else {
           if (p.hasRings) {
             const ring = new THREE.Mesh(
@@ -1279,20 +1396,10 @@ export const SolarSystemViewport: React.FC<SolarSystemViewportProps> = (props) =
       } else {
         pm.sphere.material.dispose();
       }
-      pm.sphere.geometry = new THREE.SphereGeometry(pm.data.radius, 28, 28);
-      pm.sphere.material = createVolcanicDestroyedMaterial(pm.data.seed, maxAniso);
-
-      for (let f = 0; f < 5; f++) {
-        const frag = new THREE.Mesh(
-          new THREE.DodecahedronGeometry(pm.data.radius * 0.14, 0),
-          new THREE.MeshStandardMaterial({ color: '#272024', emissive: '#9a3412', emissiveIntensity: 0.45, roughness: 0.9 })
-        );
-        const fa = (f / 5) * Math.PI * 2;
-        const fr = pm.data.radius * 1.48 + (f % 2) * 0.45;
-        frag.position.set(Math.cos(fa) * fr, ((f % 3) - 1) * 0.35, Math.sin(fa) * fr);
-        frag.rotation.set(f * 0.8, f * 1.3, 0);
-        pm.group.add(frag);
-      }
+      pm.sphere.geometry = new THREE.SphereGeometry(pm.data.radius, 16, 16);
+      pm.sphere.material = invisiblePlanetHitMaterial();
+      pm.sphere.scale.setScalar(1.25);
+      pm.group.add(buildShatteredPlanet(pm.data.radius, pm.data.seed, maxAniso));
     };
 
     const triggerPlanetCataclysm = (
@@ -1410,7 +1517,13 @@ export const SolarSystemViewport: React.FC<SolarSystemViewportProps> = (props) =
         const ecc = data.eccentricity ?? 0;
         const a = data.orbitPhase + t * data.orbitSpeed;
         group.position.set(Math.cos(a) * data.orbitRadius, 0, Math.sin(a) * data.orbitRadius * (1 - ecc));
-        sphere.rotation.y += rawDelta * (pm.isDestroyed ? 0.14 : 0.25);
+        sphere.rotation.y += rawDelta * (pm.isDestroyed ? 0.05 : 0.25);
+        const ruin = pm.group.getObjectByName('ruin');
+        if (ruin) {
+          ruin.rotation.y += rawDelta * 0.1;
+          const debris = ruin.getObjectByName('debris');
+          if (debris) debris.rotation.y += rawDelta * 0.18;
+        }
 
         // Live sync if campaign override converted a planet to -1 outside viewport
         const ovLevel = p.campaign.planetOverrides[data.id]?.level;

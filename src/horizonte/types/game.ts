@@ -639,6 +639,12 @@ export interface ActiveEnemy {
 
 export type EncounterKind = 'comercial' | 'diplomatico' | 'inimigos' | 'guerra' | 'cacada';
 
+export type EncounterGearCategory = 'weapon' | 'shield' | 'jumpDrive' | 'extractor' | 'utility' | 'suit';
+
+export type EncounterSellOffer =
+  | { kind: 'recurso'; resourceId: string; price: number }
+  | { kind: 'instalado'; category: EncounterGearCategory; itemId: string; slotIndex: number; price: number };
+
 export interface EncounterState {
   id: string;
   factionId: string;
@@ -655,6 +661,8 @@ export interface EncounterState {
   tradeOffer?: {
     resources: Array<{ resourceId: string; qty: number; price: number }>;
     items: Array<{ category: 'weapon' | 'shield' | 'extractor' | 'utility' | 'blueprint'; itemId: string; name: string; price: number }>;
+    /** No máximo duas ofertas: uma peça instalada e um recurso raro. */
+    sellOffers?: EncounterSellOffer[];
   };
   missionOffer?: Mission;
 }

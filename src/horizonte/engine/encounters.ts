@@ -1,5 +1,16 @@
-import type { EncounterKind, Mission, PlayerCampaignState } from '../types/game';
+import type { EncounterGearCategory, EncounterKind, EncounterSellOffer, Mission, OwnedShip, PlayerCampaignState } from '../types/game';
 import { FACTIONS, FACTIONS_BY_ID } from '../data/lifeforms';
+import {
+  EXTRACTORS_BY_ID,
+  JUMP_DRIVES_BY_ID,
+  RESOURCES,
+  RESOURCES_BY_ID,
+  SHIELDS_BY_ID,
+  SUIT_GEAR_BY_ID,
+  UTILITY_BY_ID,
+  WEAPONS_BY_ID,
+} from '../data/items';
+import { unitBuyPrice, type PlanetDeposits, type SupplyBand } from './market';
 
 /** Abaixo deste valor a facção trata o jogador como inimiga, mesmo sem guerra. */
 export const ENEMY_RENOWN_AT_OR_BELOW = -10;
@@ -121,3 +132,110 @@ export function markDefeatedHuntMissions<T extends { id: string; targetEnemyDefe
   if (ids.size === 0) return missions;
   return missions.map((mission) => (ids.has(mission.id) ? { ...mission, targetEnemyDefeated: true } : mission));
 }
+
+const VALUABLE_RARITY: Record<string, number> = { raro: 1, épico: 2, lendário: 3 };
+
+function stepSeed(state: number): number {
+  return (Math.imul(state, 1103515245) + 12345) >>> 0;
+}
+
+export function encounterGearTablePrice(category: EncounterGearCategory, itemId: string): number {
+  if (category === 'weapon') return WEAPONS_BY_ID[itemId]?.price ?? 0;
+  if (category === 'shield') return SHIELDS_BY_ID[itemId]?.price ?? 0;
+  if (category === 'jumpDrive') return JUMP_DRIVES_BY_ID[itemId]?.price ?? 0;
+  if (category === 'extractor') return EXTRACTORS_BY_ID[itemId]?.price ?? 0;
+  if (category === 'utility') return UTILITY_BY_ID[itemId]?.price ?? 0;
+  return SUIT_GEAR_BY_ID[itemId]?.price ?? 0;
+}
+
+/** Sempre acima da tabela: de +22% a +30%, e ainda o bônus de negociação. */
+function goodSellPrice(table: number, salt: number, tradeBonus: number): number {
+  const lift = 1.22 + (salt % 9) * 0.01;
+  return Math.max(1, Math.round(table * lift * (1 + Math.max(0, tradeBonus))));
+}
+
+export interface CommercialTradeOffer {
+  resources: Array<{ resourceId: string; qty: number; price: number }>;
+  items: Array<{ category: 'weapon' | 'shield' | 'extractor' | 'utility' | 'blueprint'; itemId: string; name: string; price: number }>;
+  sellOffers: EncounterSellOffer[];
+}
+
+/**
+ * Quatro recursos à venda, no preço real do mercado (banda do sistema, renome do comerciante).
+ * No máximo duas compras do jogador: uma peça instalada (nunca o motor de salto) e um recurso raro.
+ */
+export function buildCommercialTrade(
+  campaign: PlayerCampaignState,
+  ship: OwnedShip,
+  planets: PlanetDeposits[],
+  factionId: string,
+  tradePriceBonus: number,
+  seed: number
+): CommercialTradeOffer {
+  let state = (seed >>> 0) || 1;
+  const next = () => {
+    state = stepSeed(state);
+    return state;
+  };
+
+  const pool = [...RESOURCES];
+  const resources: CommercialTradeOffer['resources'] = [];
+  const renown = campaign.factionRenown[factionId] ?? 0;
+  const renownDiscount = Math.max(-0.15, Math.min(0.22, renown * 0.002));
+  const priceMult = 1 - renownDiscount - tradePriceBonus + (campaign.priceModifierBias ?? 0);
+
+  for (let i = 0; i < 4 && pool.length > 0; i++) {
+    const res = pool.splice(next() % pool.length, 1)[0];
+    const inSystem = planets.some((planet) => planet.deposits.some((deposit) => deposit.resourceId === res.id));
+    const band: SupplyBand = inSystem ? 'sistema' : 'ausente';
+    resources.push({
+      resourceId: res.id,
+      qty: 8 + (next() % 9),
+      price: unitBuyPrice(res.basePrice, band, priceMult),
+    });
+  }
+
+  const installed: Array<{ category: EncounterGearCategory; itemId: string; slotIndex: number }> = [];
+  if (ship.weaponId) installed.push({ category: 'weapon', itemId: ship.weaponId, slotIndex: 0 });
+  ship.shieldIds.forEach((itemId, slotIndex) => installed.push({ category: 'shield', itemId, slotIndex }));
+  ship.extractorIds.forEach((itemId, slotIndex) => installed.push({ category: 'extractor', itemId, slotIndex }));
+  ship.utilityIds.forEach((itemId, slotIndex) => installed.push({ category: 'utility', itemId, slotIndex }));
+  ship.suitGearIds.forEach((itemId, slotIndex) => installed.push({ category: 'suit', itemId, slotIndex }));
+
+  const sellOffers: EncounterSellOffer[] = [];
+  if (installed.length > 0) {
+    const pick = installed[next() % installed.length];
+    const table = encounterGearTablePrice(pick.category, pick.itemId);
+    if (table > 0) {
+      sellOffers.push({
+        kind: 'instalado',
+        category: pick.category,
+        itemId: pick.itemId,
+        slotIndex: pick.slotIndex,
+        price: goodSellPrice(table, next(), tradePriceBonus),
+      });
+    }
+  }
+
+  const valuable = campaign.cargo.filter((entry) => {
+    if (entry.qty <= 0) return false;
+    const rarity = RESOURCES_BY_ID[entry.resourceId]?.rarity;
+    return rarity != null && VALUABLE_RARITY[rarity] != null;
+  });
+  if (valuable.length > 0) {
+    const best = Math.max(...valuable.map((entry) => VALUABLE_RARITY[RESOURCES_BY_ID[entry.resourceId].rarity] ?? 0));
+    const ties = valuable.filter((entry) => (VALUABLE_RARITY[RESOURCES_BY_ID[entry.resourceId].rarity] ?? 0) === best);
+    const chosen = ties[next() % ties.length];
+    const table = RESOURCES_BY_ID[chosen.resourceId]?.basePrice ?? 0;
+    if (table > 0) {
+      sellOffers.push({
+        kind: 'recurso',
+        resourceId: chosen.resourceId,
+        price: goodSellPrice(table, next(), tradePriceBonus),
+      });
+    }
+  }
+
+  return { resources, items: [], sellOffers };
+}
+
