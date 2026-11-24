@@ -1,0 +1,36 @@
+{
+  "url": "http://127.0.0.1:8080",
+  "viewports": {
+    "desktop": {
+      "width": 1280,
+      "height": 800,
+      "status": 200,
+      "title": "Horizonte Estelar",
+      "hasCanvas": false,
+      "bodyTextLen": 1561,
+      "bodyTextHash": "e4733878089f302b5e9901f3b82dec4b7fd5ae2bdb1233b7ea73d0afcda62f65",
+      "bodyTextPrefix": "Exploração Espacial Procedural 3D · 42 Setores · 7 Formas de Vid",
+      "horizontalOverflow": false,
+      "consoleErrors": [],
+      "pageErrors": [],
+      "screenshot": "/workspace/screenshots/writing-preview.png"
+    },
+    "mobile": {
+      "width": 390,
+      "height": 844,
+      "status": 200,
+      "title": "Horizonte Estelar",
+      "hasCanvas": false,
+      "bodyTextLen": 1561,
+      "bodyTextHash": "e4733878089f302b5e9901f3b82dec4b7fd5ae2bdb1233b7ea73d0afcda62f65",
+      "bodyTextPrefix": "Exploração Espacial Procedural 3D · 42 Setores · 7 Formas de Vid",
+      "horizontalOverflow": false,
+      "consoleErrors": [],
+      "pageErrors": [],
+      "screenshot": "/workspace/screenshots/writing-preview-mobile.png"
+    }
+  },
+  "brandWarnings": [],
+  "authWarnings": [],
+  "verdictFile": "/workspace/screenshots/writing-preview.json"
+}
